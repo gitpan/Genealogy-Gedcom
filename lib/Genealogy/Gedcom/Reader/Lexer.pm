@@ -3,6 +3,10 @@ package Genealogy::Gedcom::Reader::Lexer;
 use strict;
 use warnings;
 
+use DateTime;
+
+use DateTime::Format::Gedcom;
+
 use Hash::FieldHash ':all';
 
 use Log::Handler;
@@ -15,6 +19,7 @@ fieldhash my %counter      => 'counter';
 fieldhash my %gedcom_data  => 'gedcom_data';
 fieldhash my %input_file   => 'input_file';
 fieldhash my %items        => 'items';
+fieldhash my %locale       => 'locale';
 fieldhash my %logger       => 'logger';
 fieldhash my %maxlevel     => 'maxlevel';
 fieldhash my %minlevel     => 'minlevel';
@@ -22,22 +27,90 @@ fieldhash my %report_items => 'report_items';
 fieldhash my %result       => 'result';
 fieldhash my %strict       => 'strict';
 
-our $VERSION = '0.80';
+our $VERSION = '0.81';
+
+# --------------------------------------------------
+
+sub check_date
+{
+	my($self, $id, $line) = @_;
+
+	if ($self -> check_length($id, $line) )
+	{
+		$self -> push_item($line, 'Invalid date');
+	}
+	else
+	{
+		my($date) = DateTime::Format::Gedcom -> new -> parse_date_value(date => $$line[4]);
+
+		$self -> log(debug => "$id: $date");
+		$self -> push_item($line, 'Date');
+	}
+
+} # End of check_date.
+
+# --------------------------------------------------
+
+sub check_date_period
+{
+	my($self, $id, $line) = @_;
+
+	if ($self -> check_length($id, $line) )
+	{
+		$self -> push_item($line, 'Invalid date');
+	}
+	else
+	{
+		my($date) = DateTime::Format::Gedcom -> new -> parse_date_period(date => $$line[4]);
+
+		$self -> log(debug => "$id: $date");
+		$self -> push_item($line, 'Date');
+	}
+
+} # End of check_date_period.
+
+# --------------------------------------------------
+
+sub check_exact_date
+{
+	my($self, $id, $line) = @_;
+
+	if ($self -> check_length($id, $line) )
+	{
+		$self -> push_item($line, 'Invalid date');
+	}
+	else
+	{
+		my($date) = DateTime::Format::Gedcom -> new -> parse_datetime($$line[4]);
+
+		# This is commented out because log has already been called by the caller.
+
+		#$self -> log(debug => "$id: $date");
+		$self -> push_item($line, 'Date');
+	}
+
+} # End of check_exact_date.
 
 # --------------------------------------------------
 
 sub check_length
 {
-	my($self, $key, $line) = @_;
+	my($self, $id, $line) = @_;
+	$id         =~ s/^tag_//;
 	my($value)  = $$line[4];
 	my($length) = length($value);
-	my($min)    = $self -> get_min_length($key, $line);
-	my($max)    = $self -> get_max_length($key, $line);
+	my($min)    = $self -> get_min_length($id, $line);
+	my($max)    = $self -> get_max_length($id, $line);
+	my($result) = ( ($length < $min) || ($length > $max) ) ? 1 : 0;
 
-	if ( ($length < $min) || ($length > $max) )
+	if ($result)
 	{
-		$self -> log(warning => "Line: $$line[0]. Field: $key. Value: $value. Length: $length. Valid length range $min .. $max");
+		$self -> log(warning => "Line: $$line[0]. Field: $id. Value: $value. Length: $length. Valid length range $min .. $max");
 	}
+
+	# Return 0 for success and 1 for failure.
+
+	return $result;
 
 } # End of check_length.
 
@@ -113,7 +186,7 @@ sub get_gedcom_data_from_file
 
 sub get_max_length
 {
-	my($self, $key, $line) = @_;
+	my($self, $id, $line) = @_;
 	my(%max) =
 		(
 		 address_city => 60,
@@ -258,9 +331,9 @@ sub get_max_length
 		 year_greg => 7,
 		);
 
-	# This dies rather than calls log(error...) because it's a coding error if $key is mis-spelt.
+	# This dies rather than calls log(error...) because it's a coding error if $id is mis-spelt.
 
-	return $max{$key} || die "Error: Line: $$line[0]. Invalid field name in get_max_length($key)";
+	return $max{$id} || die "Error: Line: $$line[0]. Invalid field name in get_max_length($id)";
 
 } # End of get_max_length.
 
@@ -268,12 +341,25 @@ sub get_max_length
 
 sub get_min_length
 {
-	my($self, $key, $line) = @_;
+	my($self, $id, $line) = @_;
 
 	return $self -> strict;
 
 } # End of get_min_length.
 
+# --------------------------------------------------
+
+sub get_sub_name
+{
+	my($self, @caller) = @_;
+
+	# Remove package name prefix from sub name.
+
+	$caller[3] =~ s/^.+:://;
+
+	return $caller[3];
+
+} # End of get_sub_name.
 # --------------------------------------------------
 
 sub _init
@@ -283,6 +369,7 @@ sub _init
 	$$arg{gedcom_data}  = [];
 	$$arg{input_file}   ||= ''; # Caller can set.
 	$$arg{items}        = Set::Array -> new;
+	$$arg{locale}       ||= 'en_AU';
 	my($user_logger)    = defined($$arg{logger}); # Caller can set (e.g. to '').
 	$$arg{logger}       = $user_logger ? $$arg{logger} : Log::Handler -> new;
 	$$arg{maxlevel}     ||= 'info';  # Caller can set.
@@ -305,6 +392,8 @@ sub _init
 			 }
 			);
 	}
+
+	DateTime -> DefaultLocale($self -> locale);
 
 	return $self;
 
@@ -462,9 +551,9 @@ sub run
 sub tag_address_city
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_city';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -477,9 +566,9 @@ sub tag_address_city
 sub tag_address_country
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_country';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -492,9 +581,9 @@ sub tag_address_country
 sub tag_address_email
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_email';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -507,9 +596,9 @@ sub tag_address_email
 sub tag_address_fax
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_fax';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -522,9 +611,9 @@ sub tag_address_fax
 sub tag_address_line
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_line';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -552,9 +641,9 @@ sub tag_address_line
 sub tag_address_line1
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_line1';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -567,9 +656,9 @@ sub tag_address_line1
 sub tag_address_line2
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_line2';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -582,9 +671,9 @@ sub tag_address_line2
 sub tag_address_line3
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_line3';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -597,9 +686,9 @@ sub tag_address_line3
 sub tag_address_postal_code
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_postal_code';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -612,9 +701,9 @@ sub tag_address_postal_code
 sub tag_address_state
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_state';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -627,9 +716,9 @@ sub tag_address_state
 sub tag_address_structure
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_structure';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($index, 'address_line', $$line[$index][4]);
 	$self -> push_item($$line[$index], 'Address structure');
 
@@ -669,9 +758,9 @@ sub tag_address_structure_tags
 sub tag_address_web_page
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'address_web_page';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Address');
 
@@ -687,8 +776,6 @@ sub tag_advance
 	my($level) = $$line[$index][1];
 	my($tag)   = $$line[$index][3];
 
-	$self -> log(debug => "\tEnter tag_advance. Line: $$line[$index][0]. Index: $index. Tag: $tag. Level: $level. Caller: tag_$id");
-
 	while ( ($index <= $#$line) && ($$line[$index][1] >= $level) && ($$jump{$$line[$index][3]} || ($$line[$index][3] =~ /^_/) ) )
 	{
 		if ($$jump{$$line[$index][3]})
@@ -703,8 +790,6 @@ sub tag_advance
 		}
 	}
 
-	$self -> log(debug => "\tLeave tag_advance. Line: $$line[$index][0]. Index: $index. Tag: $tag. Level: $level. Caller: tag_$id");
-
 	return $index;
 
 } # End of tag_advance.
@@ -714,9 +799,9 @@ sub tag_advance
 sub tag_age_at_event
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'age_at_event';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -729,9 +814,9 @@ sub tag_age_at_event
 sub tag_alias_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'alias_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to INDI');
 
 	return ++$index;
@@ -743,9 +828,9 @@ sub tag_alias_xref
 sub tag_ancestral_file_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'ancestral_file_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -758,9 +843,9 @@ sub tag_ancestral_file_number
 sub tag_approved_system_id
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'approved_system_id';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -784,9 +869,9 @@ sub tag_approved_system_id
 sub tag_association_structure
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'association_structure';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	return $self -> tag_advance
@@ -808,9 +893,9 @@ sub tag_association_structure
 sub tag_automated_record_id
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'automated_record_id';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -823,9 +908,9 @@ sub tag_automated_record_id
 sub tag_bapl_conl
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'bapl_conl';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	return $self -> tag_advance
@@ -850,9 +935,9 @@ sub tag_bapl_conl
 sub tag_caste_name
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'caste_name';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -874,9 +959,9 @@ sub tag_caste_name
 sub tag_cause_of_event
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'cause_of_event';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Event');
 
@@ -889,9 +974,9 @@ sub tag_cause_of_event
 sub tag_certainty_assessment
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'certainty_assessment';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -901,12 +986,34 @@ sub tag_certainty_assessment
 
 # --------------------------------------------------
 
+sub tag_change_date
+{
+	my($self, $index, $line) = @_;
+	my($id) = $self -> get_sub_name(caller 0);
+
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_exact_date($id, $$line[$index]);
+
+	return $self -> tag_advance
+		(
+		 $id,
+		 ++$index,
+		 $line,
+		 {
+			 TIME => sub{return $self -> tag_time_value(shift, shift)},
+		 }
+		);
+
+} # End of tag_change_date.
+
+# --------------------------------------------------
+
 sub tag_change_date1
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'change_date1';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], '');
 
 	return $self -> tag_advance
@@ -924,35 +1031,12 @@ sub tag_change_date1
 
 # --------------------------------------------------
 
-sub tag_change_date
-{
-	my($self, $index, $line) = @_;
-	my($id) = 'change_date';
-
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> check_length($id, $$line[$index]);
-	$self -> push_item($$line[$index], '');
-
-	return $self -> tag_advance
-		(
-		 $id,
-		 ++$index,
-		 $line,
-		 {
-			 TIME => sub{return $self -> tag_time_value(shift, shift)},
-		 }
-		);
-
-} # End of tag_change_date.
-
-# --------------------------------------------------
-
 sub tag_character_set
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'character_set';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Header');
 
@@ -973,9 +1057,9 @@ sub tag_character_set
 sub tag_child_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'child_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to INDI');
 
 	return ++$index;
@@ -987,9 +1071,9 @@ sub tag_child_xref
 sub tag_child_linkage_status
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'child_linkage_status';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -1002,9 +1086,9 @@ sub tag_child_linkage_status
 sub tag_child_to_family_link
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'child_to_family_link';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to FAM');
 
 	return $self -> tag_advance
@@ -1026,9 +1110,9 @@ sub tag_child_to_family_link
 sub tag_child_to_family_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'child_to_family_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to FAM');
 
 	return ++$index;
@@ -1040,9 +1124,9 @@ sub tag_child_to_family_xref
 sub tag_concat
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'concat';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Concat');
 
 	return ++$index;
@@ -1054,9 +1138,9 @@ sub tag_concat
 sub tag_continue
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'continue';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Continue');
 
 	return ++$index;
@@ -1068,9 +1152,9 @@ sub tag_continue
 sub tag_copyright_gedcom_file
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'copyright_gedcom_file';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Header');
 
@@ -1083,9 +1167,9 @@ sub tag_copyright_gedcom_file
 sub tag_copyright_source_data
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'copyright_source_data';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Copyright');
 
@@ -1107,9 +1191,9 @@ sub tag_copyright_source_data
 sub tag_count_of_children
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'count_of_children';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Family');
 
@@ -1122,9 +1206,9 @@ sub tag_count_of_children
 sub tag_count_of_marriages
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'count_of_marriages';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Family');
 
@@ -1137,11 +1221,10 @@ sub tag_count_of_marriages
 sub tag_date_lds_ord
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'date_lds_ord';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> check_length($id, $$line[$index]);
-	$self -> push_item($$line[$index], 'Family');
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_date($id, $$line[$index]);
 
 	return ++$index;
 
@@ -1152,11 +1235,10 @@ sub tag_date_lds_ord
 sub tag_date_period
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'date_period';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> check_length($id, $$line[$index]);
-	$self -> push_item($$line[$index], '');
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_date_period($id, $$line[$index]);
 
 	return ++$index;
 
@@ -1167,11 +1249,10 @@ sub tag_date_period
 sub tag_date_value
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'date_value';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> check_length($id, $$line[$index]);
-	$self -> push_item($$line[$index], '');
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_date($id, $$line[$index]);
 
 	return ++$index;
 
@@ -1182,9 +1263,9 @@ sub tag_date_value
 sub tag_descriptive_title
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'descriptive_title';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -1197,9 +1278,9 @@ sub tag_descriptive_title
 sub tag_endl
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'endl';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	return $self -> tag_advance
@@ -1221,12 +1302,26 @@ sub tag_endl
 
 # --------------------------------------------------
 
+sub tag_entry_recording_date
+{
+	my($self, $index, $line) = @_;
+	my($id) = $self -> get_sub_name(caller 0);
+
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_date($id, $$line[$index]);
+
+	return ++$index;
+
+} # End of tag_entry_recording_date.
+
+# --------------------------------------------------
+
 sub tag_event_detail
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'event_detail';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Event');
 
 	return $self -> tag_advance
@@ -1269,9 +1364,9 @@ sub tag_event_detail_tags
 sub tag_event_or_fact_classification
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'event_or_fact_classification';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -1284,9 +1379,9 @@ sub tag_event_or_fact_classification
 sub tag_event_type_cited_from
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'event_type_cited_from';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Event');
 
 	return $self -> tag_advance
@@ -1306,9 +1401,9 @@ sub tag_event_type_cited_from
 sub tag_events_recorded
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'events_recorded';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Event');
 
@@ -1330,9 +1425,9 @@ sub tag_events_recorded
 sub tag_family_event_detail
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'family_event_detail';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Event');
 
 	return $self -> tag_advance
@@ -1354,9 +1449,9 @@ sub tag_family_event_detail
 sub tag_file_name
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'file_name';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'File name');
 
@@ -1369,9 +1464,9 @@ sub tag_file_name
 sub tag_family_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'family_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Family');
 
 	return $self -> tag_advance
@@ -1415,9 +1510,9 @@ sub tag_family_record
 sub tag_gedcom
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'gedcom';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Header');
 
 	return $self -> tag_advance
@@ -1438,9 +1533,9 @@ sub tag_gedcom
 sub tag_gedcom_form
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'gedcom_form';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -1453,9 +1548,9 @@ sub tag_gedcom_form
 sub tag_generations_of_ancestors
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'generations_of_ancestors';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Submission');
 
@@ -1468,9 +1563,9 @@ sub tag_generations_of_ancestors
 sub tag_generations_of_descendants
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'generations_of_descendants';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Submission');
 
@@ -1483,9 +1578,9 @@ sub tag_generations_of_descendants
 sub tag_header
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'header';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Header');
 
 	return $self -> tag_advance
@@ -1516,9 +1611,9 @@ sub tag_header
 sub tag_husband_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'husband_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to INDI');
 
 	return ++$index;
@@ -1530,9 +1625,9 @@ sub tag_husband_xref
 sub tag_individual_attribute_detail
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'individual_attribute_detail';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	return ++$index;
@@ -1570,9 +1665,9 @@ sub tag_individual_attribute_structure_tags
 sub tag_individual_event_detail
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'individual_event_detail';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Event');
 
 	return $self -> tag_advance
@@ -1629,9 +1724,9 @@ sub tag_individual_event_structure_tags
 sub tag_individual_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'individual_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	return $self -> tag_advance
@@ -1671,9 +1766,9 @@ sub tag_individual_record
 sub tag_language_of_text
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'language_of_text';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Header');
 
@@ -1686,9 +1781,9 @@ sub tag_language_of_text
 sub tag_language_preference
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'language_preference';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Submitter');
 
@@ -1701,9 +1796,9 @@ sub tag_language_preference
 sub tag_lds_baptism_date_status
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'lds_baptism_date_status';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -1724,9 +1819,9 @@ sub tag_lds_baptism_date_status
 sub tag_lds_child_sealing_date_status
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'lds_child_sealing_date_status';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -1747,9 +1842,9 @@ sub tag_lds_child_sealing_date_status
 sub tag_lds_endowment_date_status
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'lds_endowment_date_status';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -1770,10 +1865,10 @@ sub tag_lds_endowment_date_status
 sub tag_lds_spouse_sealing
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'lds_spouse_sealing';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> push_item($$line[$index], 'Family');
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_date($id, $$line[$index]);
 
 	return $self -> tag_advance
 		(
@@ -1797,9 +1892,9 @@ sub tag_lds_spouse_sealing
 sub tag_lds_spouse_sealing_date_status
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'lds_spouse_sealing_date_status';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Family');
 
@@ -1820,9 +1915,9 @@ sub tag_lds_spouse_sealing_date_status
 sub tag_lineage
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'lineage';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 
 	$index = $self -> tag_header($index, $line);
 	$index = $self -> tag_advance
@@ -1859,9 +1954,9 @@ sub tag_lineage
 sub tag_map
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'map';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Place');
 
 	return $self -> tag_advance
@@ -1882,9 +1977,9 @@ sub tag_map
 sub tag_multimedia_link
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'multimedia_link';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to OBJE');
 
 	return $self -> tag_advance
@@ -1905,9 +2000,9 @@ sub tag_multimedia_link
 sub tag_multimedia_link_file_refn
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'multimedia_link_file_refn';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($index, 'multimedia_file_reference', $$line[$index][4]);
 	$self -> push_item($$line[$index], 'Multimedia');
 
@@ -1928,9 +2023,9 @@ sub tag_multimedia_link_file_refn
 sub tag_multimedia_link_format
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'multimedia_format';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Multimedia');
 
@@ -1951,9 +2046,9 @@ sub tag_multimedia_link_format
 sub tag_multimedia_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'multimedia_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Multimedia');
 
 	return $self -> tag_advance
@@ -1978,9 +2073,9 @@ sub tag_multimedia_record
 sub tag_multimedia_record_file_refn
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'multimedia_record_file_refn';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($index, 'multimedia_file_reference', $$line[$index][4]);
 	$self -> push_item($$line[$index], 'Multimedia');
 
@@ -2002,9 +2097,9 @@ sub tag_multimedia_record_file_refn
 sub tag_multimedia_record_format
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'multimedia_format';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Multimedia');
 
@@ -2025,9 +2120,9 @@ sub tag_multimedia_record_format
 sub tag_name_of_business
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_of_business';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2048,9 +2143,9 @@ sub tag_name_of_business
 sub tag_name_of_family_file
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_of_family_file';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'File name');
 
@@ -2063,9 +2158,9 @@ sub tag_name_of_family_file
 sub tag_name_of_product
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_of_product';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2078,9 +2173,9 @@ sub tag_name_of_product
 sub tag_name_of_repository
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_of_repository';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Repository');
 
@@ -2093,9 +2188,9 @@ sub tag_name_of_repository
 sub tag_name_of_source_data
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_of_source_data';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -2117,9 +2212,9 @@ sub tag_name_of_source_data
 sub tag_name_personal
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_personal';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2143,9 +2238,9 @@ sub tag_name_personal
 sub tag_name_phonetic_variation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_phonetic_variation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2167,9 +2262,9 @@ sub tag_name_phonetic_variation
 sub tag_name_piece_given
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_piece_given';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2182,9 +2277,9 @@ sub tag_name_piece_given
 sub tag_name_piece_nickname
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_piece_nickname';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2197,9 +2292,9 @@ sub tag_name_piece_nickname
 sub tag_name_piece_prefix
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_piece_prefix';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2212,9 +2307,9 @@ sub tag_name_piece_prefix
 sub tag_name_piece_suffix
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_piece_suffix';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2227,9 +2322,9 @@ sub tag_name_piece_suffix
 sub tag_name_piece_surname
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_piece_surname';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2242,9 +2337,9 @@ sub tag_name_piece_surname
 sub tag_name_piece_surname_prefix
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_piece_surname_prefix';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2257,9 +2352,9 @@ sub tag_name_piece_surname_prefix
 sub tag_name_romanized_variation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_romanized_variation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2281,9 +2376,9 @@ sub tag_name_romanized_variation
 sub tag_name_type
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'name_type';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2296,9 +2391,9 @@ sub tag_name_type
 sub tag_national_or_tribal_origin
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'national_or_tribal_origin';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2311,9 +2406,9 @@ sub tag_national_or_tribal_origin
 sub tag_national_id_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'national_id_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2326,9 +2421,9 @@ sub tag_national_id_number
 sub tag_nobility_type_title
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'nobility_type_title';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2341,9 +2436,9 @@ sub tag_nobility_type_title
 sub tag_note_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'note_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Note');
 
 	return $self -> tag_advance
@@ -2368,9 +2463,9 @@ sub tag_note_record
 sub tag_note_structure
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'note_structure';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Note');
 
 	return $self -> tag_advance
@@ -2391,9 +2486,9 @@ sub tag_note_structure
 sub tag_occupation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'occupation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2406,9 +2501,9 @@ sub tag_occupation
 sub tag_ordinance_process_flag
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'ordinance_process_flag';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Submission');
 
@@ -2421,9 +2516,9 @@ sub tag_ordinance_process_flag
 sub tag_pedigree_linkage_type
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'pedigree_linkage_type';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2436,9 +2531,9 @@ sub tag_pedigree_linkage_type
 sub tag_permanent_record_file_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'permanent_record_file_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2471,9 +2566,9 @@ sub tag_personal_name_piece_tags
 sub tag_personal_name_pieces
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'personal_name_pieces';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	# Special case. $index not ++$index.
@@ -2495,9 +2590,9 @@ sub tag_personal_name_pieces
 sub tag_phone_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'phone_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2510,9 +2605,9 @@ sub tag_phone_number
 sub tag_phonetic_type
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'phonetic_type';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2525,9 +2620,9 @@ sub tag_phonetic_type
 sub tag_physical_description
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'physical_description';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2540,9 +2635,9 @@ sub tag_physical_description
 sub tag_place
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Place');
 
 	return $self -> tag_advance
@@ -2562,9 +2657,9 @@ sub tag_place
 sub tag_place_hierarchy
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_hierarchy';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2577,9 +2672,9 @@ sub tag_place_hierarchy
 sub tag_place_latitude
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_latitude';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2592,9 +2687,9 @@ sub tag_place_latitude
 sub tag_place_living_ordinance
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_living_ordinance';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2607,9 +2702,9 @@ sub tag_place_living_ordinance
 sub tag_place_longitude
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_longitude';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2622,9 +2717,9 @@ sub tag_place_longitude
 sub tag_place_name
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_name';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2649,9 +2744,9 @@ sub tag_place_name
 sub tag_place_phonetic_variation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_phonetic_variation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2672,9 +2767,9 @@ sub tag_place_phonetic_variation
 sub tag_place_romanized_variation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'place_romanized_variation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Place');
 
@@ -2695,9 +2790,9 @@ sub tag_place_romanized_variation
 sub tag_possessions
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'possessions';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2710,11 +2805,10 @@ sub tag_possessions
 sub tag_publication_date
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'publication_date';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> check_length($id, $$line[$index]);
-	$self -> push_item($$line[$index], '');
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_exact_date($id, $$line[$index]);
 
 	return ++$index;
 
@@ -2725,9 +2819,9 @@ sub tag_publication_date
 sub tag_receiving_system_name
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'receiving_system_name';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Header');
 
@@ -2740,9 +2834,9 @@ sub tag_receiving_system_name
 sub tag_relation_is_descriptor
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'relation_is_descriptor';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2755,9 +2849,9 @@ sub tag_relation_is_descriptor
 sub tag_religious_affiliation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'religious_affiliation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2770,9 +2864,9 @@ sub tag_religious_affiliation
 sub tag_repository_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'repository_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Repository');
 
 	return $self -> tag_advance
@@ -2797,9 +2891,9 @@ sub tag_repository_record
 sub tag_responsible_agency
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'responsible_agency';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -2812,9 +2906,9 @@ sub tag_responsible_agency
 sub tag_restriction_notice
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'restriction_notice';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2827,9 +2921,9 @@ sub tag_restriction_notice
 sub tag_rin
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'rin';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], '');
 
 	return ++$index;
@@ -2841,9 +2935,9 @@ sub tag_rin
 sub tag_role_in_event
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'role_in_event';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -2856,9 +2950,9 @@ sub tag_role_in_event
 sub tag_romanized_type
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'romanized_type';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -2871,9 +2965,9 @@ sub tag_romanized_type
 sub tag_scholastic_achievement
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'scholastic_achievement';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2886,9 +2980,9 @@ sub tag_scholastic_achievement
 sub tag_sex_value
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'sex_value';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2901,9 +2995,9 @@ sub tag_sex_value
 sub tag_slgc
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'slgc';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Individual');
 
 	return $self -> tag_advance
@@ -2929,9 +3023,9 @@ sub tag_slgc
 sub tag_social_security_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'social_security_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Individual');
 
@@ -2944,9 +3038,9 @@ sub tag_social_security_number
 sub tag_source_call_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_call_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -2959,9 +3053,9 @@ sub tag_source_call_number
 sub tag_source_citation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_citation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Source');
 
 	return $self -> tag_advance
@@ -2989,9 +3083,9 @@ sub tag_source_citation
 sub tag_source_citation_data
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_citation_data';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Source');
 
 	return $self -> tag_advance
@@ -3012,9 +3106,9 @@ sub tag_source_citation_data
 sub tag_source_data
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_data';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Source');
 
 	return $self -> tag_advance
@@ -3036,9 +3130,9 @@ sub tag_source_data
 sub tag_source_descriptive_title
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_descriptive_title';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3060,9 +3154,9 @@ sub tag_source_descriptive_title
 sub tag_source_filed_by_entry
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_filed_by_entry';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3075,9 +3169,9 @@ sub tag_source_filed_by_entry
 sub tag_source_jurisdiction_place
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_jurisdiction_place';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3090,9 +3184,9 @@ sub tag_source_jurisdiction_place
 sub tag_source_media_type
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_media_type';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3105,9 +3199,9 @@ sub tag_source_media_type
 sub tag_source_originator
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_originator';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3129,9 +3223,9 @@ sub tag_source_originator
 sub tag_source_publication_date
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_publication_date';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Source');
 
 	return ++$index;
@@ -3143,9 +3237,9 @@ sub tag_source_publication_date
 sub tag_source_publication_facts
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_publication_facts';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3167,9 +3261,9 @@ sub tag_source_publication_facts
 sub tag_source_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Source');
 
 	return $self -> tag_advance
@@ -3200,9 +3294,9 @@ sub tag_source_record
 sub tag_source_record_data
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'source_record_data';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Source');
 
 	return $self -> tag_advance
@@ -3224,9 +3318,9 @@ sub tag_source_record_data
 sub tag_spouse_to_family_link
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'spouse_to_family_link';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to FAM');
 
 	return $self -> tag_advance
@@ -3246,9 +3340,9 @@ sub tag_spouse_to_family_link
 sub tag_submission_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submission_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to SUBM');
 
 	return $self -> tag_advance
@@ -3275,9 +3369,9 @@ sub tag_submission_record
 sub tag_submission_repository_citation
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submission_repository_citation';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Submission');
 
 	return $self -> tag_advance
@@ -3299,9 +3393,9 @@ sub tag_submission_repository_citation
 sub tag_submission_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submission_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Submission');
 
 	return ++$index;
@@ -3313,9 +3407,9 @@ sub tag_submission_xref
 sub tag_submitter_record
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submitter_record';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Submitter');
 
 	return $self -> tag_advance
@@ -3342,9 +3436,9 @@ sub tag_submitter_record
 sub tag_submitter_registered_rfn
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submitter_registered_rfn';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Submitter');
 
@@ -3357,9 +3451,9 @@ sub tag_submitter_registered_rfn
 sub tag_submitter_name
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submitter_name';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Submission');
 
@@ -3372,9 +3466,9 @@ sub tag_submitter_name
 sub tag_submitter_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'submitter_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Submission');
 
 	return ++$index;
@@ -3386,9 +3480,9 @@ sub tag_submitter_xref
 sub tag_temple_code
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'temple_code';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -3401,9 +3495,9 @@ sub tag_temple_code
 sub tag_text_from_source
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'text_from_source';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -3425,9 +3519,9 @@ sub tag_text_from_source
 sub tag_time_value
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'time_value';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -3440,9 +3534,9 @@ sub tag_time_value
 sub tag_trailer
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'trailer';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> log(warning => "Line: $$line[$index][0]. The unknown tag $$line[$index][3] was detected") if ($$line[$index][3] ne 'TRLR');
 	$self -> push_item($$line[$index], 'Trailer');
 
@@ -3455,11 +3549,10 @@ sub tag_trailer
 sub tag_transmission_date
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'transmission_date';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
-	$self -> check_length($id, $$line[$index]);
-	$self -> push_item($$line[$index], 'Header');
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> check_exact_date($id, $$line[$index]);
 
 	return $self -> tag_advance
 		(
@@ -3478,9 +3571,9 @@ sub tag_transmission_date
 sub tag_user_reference_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'user_reference_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -3501,9 +3594,9 @@ sub tag_user_reference_number
 sub tag_user_reference_type
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'user_reference_type';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -3516,9 +3609,9 @@ sub tag_user_reference_type
 sub tag_version_number
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'version_number';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], '');
 
@@ -3531,9 +3624,9 @@ sub tag_version_number
 sub tag_where_within_source
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'where_within_source';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> check_length($id, $$line[$index]);
 	$self -> push_item($$line[$index], 'Source');
 
@@ -3546,9 +3639,9 @@ sub tag_where_within_source
 sub tag_wife_xref
 {
 	my($self, $index, $line) = @_;
-	my($id) = 'wife_xref';
+	my($id) = $self -> get_sub_name(caller 0);
 
-	$self -> log(debug => "tag_$id($$line[$index][0], '$$line[$index][5]')");
+	$self -> log(debug => "$id($$line[$index][0], '$$line[$index][5]')");
 	$self -> push_item($$line[$index], 'Link to INDI');
 
 	return ++$index;
@@ -3571,11 +3664,11 @@ Run scripts/lex.pl -help.
 
 A typical run would be:
 
-perl -Ilib scripts/lex.pl -i data/royal.ged -report_items 1 -strict 1
+perl -Ilib scripts/lex.pl -i data/royal.ged -r 1 -s 1
 
-Turn on debugging (extra logging) with:
+Turn on debugging prints with:
 
-perl -Ilib scripts/lex.pl -i data/royal.ged -report_items 1 -strict 1 -max debug
+perl -Ilib scripts/lex.pl -i data/royal.ged -r 1 -s 1 -max debug
 
 royal.ged was downloaded from L<http://www.vjet.f2s.com/ftree/download.html>. It's more up-to-date than the one shipped with L<Gedcom>.
 
@@ -3628,6 +3721,12 @@ Key-value pairs accepted in the parameter list (see corresponding methods for de
 Read the GEDCOM data from this file.
 
 Default: ''.
+
+=item o locale => $a_locale_name
+
+Specify the locale for L<DateTime> objects.
+
+Default: 'en_AU'.
 
 =item o logger => $logger_object
 
@@ -3682,7 +3781,7 @@ Note: A string of length 1 - e.g. '0' - might still be an error.
 Default: 0.
 
 The upper lengths on strings are always as per L<the GEDCOM Specification Ged551-5.pdf|http://wiki.webtrees.net/File:Ged551-5.pdf>.
-See L</get_max_length($key, $line)> for details.
+See L</get_max_length($id, $line)> for details.
 
 String lengths out of range (as with all validation failures) are reported as log messages at level 'warning'.
 
@@ -3690,11 +3789,23 @@ String lengths out of range (as with all validation failures) are reported as lo
 
 =head1 Methods
 
-=head2 check_length($key, $line)
+=head2 check_date($id, $line)
 
-Checks the length of the data component (after the tag) on the given input $line.
+Checks the date field in the input arrayref $line, $$line[4].
 
-$key identifies what type of record the $line is expected to be.
+$id identifies what type of record the $line is expected to be.
+
+=head2 check_length($id, $line)
+
+Checks the length of the data component (after the tag) on the input arrayref $line, $$line[4].
+
+$id identifies what type of record the $line is expected to be.
+
+=head2 cross_check_xrefs
+
+Ensure that all xrefs point to existing records.
+
+See L<FAQ/What validation is performed?> for details.
 
 =head2 get_gedcom_from_file()
 
@@ -3712,19 +3823,19 @@ This is normally only used internally, but can be used to bypass reading from a 
 
 Note: If supplying data this way rather than via the file, you must strip newlines etc on every line, as well as leading and trailing blanks.
 
-=head2 get_max_length($key, $line)
+=head2 get_max_length($id, $line)
 
 Get the maximum string length of the data component (after the tag) on the given $line.
 
-$key identifies what type of record the $line is expected to be.
+$id identifies what type of record the $line is expected to be.
 
-=head2 get_min_length($key, $line)
+=head2 get_min_length($id, $line)
 
 Get the minimum string length of the data component (after the tag) on the given $line.
 
 Currently, this value is actually the value of strict(), i.e. 0 or 1.
 
-$key identifies what type of record the $line is expected to be.
+$id identifies what type of record the $line is expected to be.
 
 =head2 input_file([$gedcom_file_name])
 
@@ -3737,6 +3848,12 @@ Get or set the name of the file to read the GEDCOM data from.
 Returns a object of type L<Set::Array>, which is an arrayref of items output by the lexer.
 
 See the L</FAQ> for details.
+
+=head2 locale([$a_locale_name])
+
+Here, the [] indicate an optional parameter.
+
+Get or set the name of the locale to use for L<DateTime> objects.
 
 =head2 log($level, $s)
 
@@ -3771,6 +3888,12 @@ This option is only used if the lexer creates an object of type L<Log::Handler>.
 Pushes a hashref of components of the $line, with type $type, onto the arrayref of items returned by L</items()>.
 
 See the L</FAQ> for details.
+
+=head2 renumber_items()
+
+Scan the arrayref of hashrefs returned by items() and ensure the 'count' field is ok.
+
+This is done in case array elements have been combined, e.g. when processing CONCs and CONTs for NOTEs.
 
 =head2 report()
 
@@ -3894,6 +4017,12 @@ Used for various cases.
 
 =item o Continue
 
+=item o Date
+
+If the type is 'Date', then it has been successfully parsed.
+
+If parsing failed, the value will be 'Invalid date'.
+
 =item o Event
 
 =item o Family
@@ -3903,6 +4032,12 @@ Used for various cases.
 =item o Header
 
 =item o Individual
+
+=item o Invalid date
+
+If the type is 'Date', then it has been successfully parsed.
+
+If parsing failed, the value will be 'Invalid date'.
 
 =item o Link to FAM
 
@@ -3958,6 +4093,8 @@ Details:
 
 Xrefs (pointers) are checked that they point to an xref which exists. Each dangling xref is only reported once.
 
+=item o Dates are validated
+
 =item o Duplicate xrefs
 
 Xrefs which are (potentially) pointed to are checked for uniqueness.
@@ -3991,8 +4128,6 @@ All validation failures are reported as log messages at level 'warning'.
 Here are some suggestions from L<the mailing list|The Gedcom Mailing List>:
 
 =over 4
-
-=item o Date checks and more date checks
 
 =item o Mandatory sub-tags
 
@@ -4080,6 +4215,20 @@ By sub-classing.
 ASCII - i.e. nothing else has been tested.
 
 The code should really ought to support ANSEL (a superset of ASCII), ASCII, UTF-8 and UTF-16 (known to GEDCOM as UNICODE).
+
+=head1 TODO
+
+=over 4
+
+=item o Test input file for binary
+
+=item o Test input file for non-ASCII character sets
+
+=item o Test input file for size 0
+
+=item o Tighten validation
+
+=back
 
 =head1 Machine-Readable Change Log
 
@@ -4192,4 +4341,3 @@ Australian copyright (c) 2011, Ron Savage.
 	The Artistic License, a copy of which is available at:
 	http://www.opensource.org/licenses/index.html
 
-=cut
