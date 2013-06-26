@@ -3,7 +3,7 @@ package Genealogy::Gedcom;
 use strict;
 use warnings;
 
-our $VERSION = '0.82';
+our $VERSION = '0.83';
 
 # --------------------------------------------------
 
@@ -13,7 +13,7 @@ our $VERSION = '0.82';
 
 =head1 NAME
 
-L<Genealogy::Gedcom> - An OS-independent processor for GEDCOM data
+Genealogy::Gedcom - An OS-independent processor for GEDCOM data
 
 =head1 Synopsis
 
